@@ -1,0 +1,12 @@
+cookie_1 = "client_session=xxxxxx"
+cookie_2 = "client_session=xxxxxx"
+
+bot_uid = [123, 456]
+
+room = "随机房"
+
+map = 1
+speed = 4
+private = false
+
+leaderboard_id = 161 # 分数排行榜说说id
