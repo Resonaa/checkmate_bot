@@ -137,16 +137,17 @@ pub fn new_bot(role: Role) -> Result<()> {
         if let event::MapUpdate::Round(new_round) = &map_update[0] {
             *round = *new_round;
 
-            if new_round % 100 == 0
-                && role == Role::Upgrader
-                && *challenger > 0
-                && *new_round < 1000
+            if new_round % 100 == 0 && role == Role::Upgrader && *challenger > 0 && *new_round < 800
             {
                 send_message(&socket, &format!("{}回合", new_round))?;
             }
         }
 
         let mut gm = gm.lock();
+
+        if gm.len() == 0 {
+            return Ok(());
+        }
 
         if let event::MapUpdate::Data(data) = &map_update[1] {
             for [x, y, land] in data {
@@ -174,11 +175,15 @@ pub fn new_bot(role: Role) -> Result<()> {
                 }
             }
 
-            if flag || *challenger > 0 && *round >= 1000 {
+            if flag || *challenger > 0 && *round >= 800 {
                 socket.emit("view", json!(true))?;
                 socket.emit("view", json!(false))?;
                 return Ok(());
             }
+        } else if *challenger > 0 && *round >= 800 {
+            socket.emit("view", json!(true))?;
+            socket.emit("view", json!(false))?;
+            return Ok(());
         }
 
         let movememt = if *challenger > 0 {
@@ -208,6 +213,7 @@ pub fn new_bot(role: Role) -> Result<()> {
     let color_to_uid = global_color_to_uid.clone();
     let round = global_round;
     let size = global_size;
+    let vote = global_vote.clone();
     let win_action = move |payload: String, socket| {
         let winner: String = serde_json::from_str(&payload)?;
 
@@ -219,10 +225,10 @@ pub fn new_bot(role: Role) -> Result<()> {
 
         vote_map(&socket)?;
 
+        let mut challenger = challenger.lock();
+
         if role == Role::Upgrader {
             socket.emit("VoteStart", json!(1))?;
-
-            let mut challenger = challenger.lock();
 
             if *challenger <= 0 {
                 return Ok(());
@@ -249,13 +255,13 @@ pub fn new_bot(role: Role) -> Result<()> {
 
                 if uid != *challenger {
                     send_message(&socket, "挑战失败")?;
-                } else if *round >= 1000 {
+                } else if *round >= 800 {
                     send_message(&socket, "挑战超时")?;
                 } else {
                     let challenger_color = color_to_uid
                         .lock()
                         .iter()
-                        .find(|(_, &_uid)| _uid as i32 == uid)
+                        .find(|(_, uid)| !CONFIG.bot_uid.contains(uid))
                         .unwrap()
                         .0
                         .to_owned();
@@ -348,9 +354,11 @@ pub fn new_bot(role: Role) -> Result<()> {
                     }
                 }
             }
-
-            *challenger = 0;
         }
+
+        *challenger = 0;
+
+        *vote.lock() = false;
 
         Ok(())
     };
@@ -365,22 +373,29 @@ pub fn new_bot(role: Role) -> Result<()> {
         color_to_uid.clear();
 
         let mut challenger = challenger.lock();
+        let mut new_challenger = 0;
 
         for (uid, value) in map {
             let color = value["color"].as_u64().unwrap() as u8;
+            let gaming = value["gaming"].as_bool().unwrap();
 
-            if color != 0 {
-                let uid = uid.parse::<u32>()?;
+            if color != 0 && gaming {
+                let uid: u32 = uid.parse()?;
 
-                if !CONFIG.bot_uid.contains(&uid) && *challenger == -1 {
-                    *challenger = uid as i32;
-
-                    if role == Role::Upgrader {
-                        send_message(&socket, "挑战开始")?;
-                    }
+                if !CONFIG.bot_uid.contains(&uid) && *challenger <= 0 {
+                    new_challenger = uid as i32;
                 }
 
                 color_to_uid.insert(color, uid);
+            }
+        }
+
+        if color_to_uid.len() == 3 && new_challenger > 0 {
+            *challenger = new_challenger;
+
+            if role == Role::Upgrader {
+                info!("challenger: {}", new_challenger);
+                send_message(&socket, "挑战开始")?;
             }
         }
 
