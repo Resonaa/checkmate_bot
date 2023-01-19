@@ -1,7 +1,6 @@
-use crate::{Role, CONFIG};
-use hashbrown::HashMap;
+use crate::BotData;
 use serde::Deserialize;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Deserialize, Default)]
 pub struct Land {
@@ -21,6 +20,10 @@ pub type Pos = (usize, usize);
 pub type Movement = (Pos, Pos, u8);
 
 static DIR: [[i8; 2]; 4] = [[-1, 0], [0, 1], [1, 0], [0, -1]];
+
+fn is_superior(uid: &u32, config: &BotData) -> bool {
+    matches!(config.team.get_index_of(uid), Some(index) if index + 1 > config.id)
+}
 
 fn get_neighbours(gm: &Map, size: usize, pos: Pos) -> Vec<Pos> {
     let mut ans = Vec::new();
@@ -74,7 +77,7 @@ fn change_target(
     size: usize,
     my_color: u8,
     color_to_uid: &HashMap<u8, u32>,
-    role: Role,
+    config: &BotData,
 ) -> Option<Pos> {
     let visible = |(x, y): Pos| {
         for dx in -1..=1 {
@@ -103,7 +106,9 @@ fn change_target(
             let node = &gm[i][j];
 
             if !matches!(node.r#type, 4 | 6) && node.color != my_color && visible((i, j)) {
-                if role == Role::Player && CONFIG.bot_uid.contains(color_to_uid.get(&node.color)?) {
+                let uid = color_to_uid.get(&node.color)?;
+
+                if is_superior(uid, config) {
                     continue;
                 }
 
@@ -122,10 +127,7 @@ fn change_target(
         let land = &gm[x][y];
         let mut score = score.get(&land.r#type).unwrap().to_owned();
 
-        if CONFIG
-            .bot_uid
-            .contains(color_to_uid.get(&land.color).unwrap())
-        {
+        if config.team.contains(color_to_uid.get(&land.color).unwrap()) {
             score += 10;
         }
 
@@ -142,16 +144,21 @@ fn next_move(
     size: usize,
     my_color: u8,
     color_to_uid: &HashMap<u8, u32>,
-    role: Role,
+    config: &BotData,
     target: &mut Option<Pos>,
     from: &mut Option<Pos>,
+    no_recursion: bool,
 ) -> Option<Movement> {
     if target.is_none() || matches!(&target, Some((x, y)) if gm[*x][*y].color == my_color) {
-        *target = change_target(gm, size, my_color, color_to_uid, role);
+        *target = change_target(gm, size, my_color, color_to_uid, config);
         *from = None;
 
         if target.is_none() {
-            return None;
+            return if no_recursion {
+                None
+            } else {
+                expand(gm, size, my_color, color_to_uid, config, target, from, true)
+            };
         }
     }
 
@@ -199,7 +206,7 @@ fn next_move(
             }
 
             for nxt in get_neighbours(gm, size, (cur_x, cur_y)) {
-                if !vis.contains_key(&nxt) {
+                vis.entry(nxt).or_insert_with(|| {
                     if cur_x == i && cur_y == j {
                         q.push_back((
                             nxt,
@@ -211,8 +218,8 @@ fn next_move(
                         q.push_back((nxt, amount + get_score(&gm[nxt.0][nxt.1]), length + 1, ans));
                     }
 
-                    vis.insert(nxt, true);
-                }
+                    true
+                });
             }
         }
     };
@@ -266,9 +273,10 @@ fn expand(
     size: usize,
     my_color: u8,
     color_to_uid: &HashMap<u8, u32>,
-    role: Role,
+    config: &BotData,
     target: &mut Option<Pos>,
     from: &mut Option<Pos>,
+    no_recursion: bool,
 ) -> Option<Movement> {
     let score: HashMap<u8, u8> = HashMap::from([(1, 1), (3, 2), (2, 3), (5, 4), (0, 5)]);
 
@@ -284,9 +292,7 @@ fn expand(
                     let end_node = &gm[end.0][end.1];
 
                     if end_node.color != my_color && start_node.amount > end_node.amount + 1 {
-                        if role == Role::Player
-                            && CONFIG.bot_uid.contains(color_to_uid.get(&end_node.color)?)
-                        {
+                        if is_superior(color_to_uid.get(&end_node.color)?, config) {
                             continue;
                         }
 
@@ -298,7 +304,11 @@ fn expand(
     }
 
     if tmp.is_empty() {
-        return next_move(gm, size, my_color, color_to_uid, role, target, from);
+        return if no_recursion {
+            None
+        } else {
+            next_move(gm, size, my_color, color_to_uid, config, target, from, true)
+        };
     }
 
     fastrand::shuffle(&mut tmp);
@@ -307,10 +317,7 @@ fn expand(
         let land = &gm[x][y];
         let mut score = score.get(&land.r#type).unwrap().to_owned();
 
-        if CONFIG
-            .bot_uid
-            .contains(color_to_uid.get(&land.color).unwrap())
-        {
+        if config.team.contains(color_to_uid.get(&land.color).unwrap()) {
             score += 10;
         }
 
@@ -329,13 +336,31 @@ pub fn bot_move(
     size: usize,
     my_color: u8,
     color_to_uid: &HashMap<u8, u32>,
-    role: Role,
+    config: &BotData,
     target: &mut Option<Pos>,
     from: &mut Option<Pos>,
 ) -> Option<Movement> {
     if fastrand::u8(1..=100) >= 70 {
-        next_move(gm, size, my_color, color_to_uid, role, target, from)
+        next_move(
+            gm,
+            size,
+            my_color,
+            color_to_uid,
+            config,
+            target,
+            from,
+            false,
+        )
     } else {
-        expand(gm, size, my_color, color_to_uid, role, target, from)
+        expand(
+            gm,
+            size,
+            my_color,
+            color_to_uid,
+            config,
+            target,
+            from,
+            false,
+        )
     }
 }

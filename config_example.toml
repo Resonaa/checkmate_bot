@@ -1,12 +1,26 @@
-cookie_1 = "client_session=xxxxxx"
-cookie_2 = "client_session=xxxxxx"
+[[bots]]
+cookie = "client_session=xxxxxx"
+room = "Test"                    # the first bot in `Test`
+auto_ready = true                # always ready
+# the bot is in Team `0` by default
 
-bot_uid = [123, 456]
+[[bots]]
+cookie = "client_session=xxxxxx"
+room = "Test"                    # the second bot in `Test`
+auto_ready = { more_than = 3 }   # ready only when there are more than 3 players
+# in Team `0` as well
 
-room = "随机房"
+[[bots]]
+cookie = "client_session=xxxxxx"
+room = "Test"                    # another bot in `Test`
+auto_ready = { more_than = 5 }
+team = 1                         # but in a different (explicitly given) team, plays against the other two bots
 
-map = 1
-speed = 4
-private = false
+[[bots]]
+cookie = "client_session=xxxxxx"
+room = "随机房"                     # join a different room
+auto_ready = false               # never ready
 
-leaderboard_id = 161 # 分数排行榜说说id
+[rooms]
+Test = { map = 2, speed = 4, private = true }
+"随机房" = { private = false }                   # room settings are optional
