@@ -291,7 +291,9 @@ fn expand(
                 for end in get_neighbours(gm, size, start) {
                     let end_node = &gm[end.0][end.1];
 
-                    if end_node.color != my_color && start_node.amount > end_node.amount + 1 {
+                    let delta = if end_node.r#type == 3 { 2 } else { 1 };
+
+                    if end_node.color != my_color && start_node.amount > end_node.amount + delta {
                         if is_superior(color_to_uid.get(&end_node.color)?, config) {
                             continue;
                         }
@@ -340,7 +342,7 @@ pub fn bot_move(
     target: &mut Option<Pos>,
     from: &mut Option<Pos>,
 ) -> Option<Movement> {
-    if fastrand::u8(1..=100) >= 70 {
+    if fastrand::u8(1..=100) >= config.bot.expand_rate {
         next_move(
             gm,
             size,

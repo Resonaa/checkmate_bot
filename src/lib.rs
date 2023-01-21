@@ -16,6 +16,10 @@ pub enum AutoReady {
     Conditional { more_than: u8 },
 }
 
+const fn default_expand_rate() -> u8 {
+    70
+}
+
 #[derive(Deserialize, Clone, Copy)]
 pub struct BotConfig<'a> {
     pub cookie: &'a str,
@@ -24,6 +28,9 @@ pub struct BotConfig<'a> {
 
     #[serde(default)]
     pub team: u32,
+
+    #[serde(default = "default_expand_rate")]
+    pub expand_rate: u8,
 }
 
 #[derive(Deserialize, Clone, Copy)]
