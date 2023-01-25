@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::BotData;
 use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
@@ -68,7 +70,41 @@ fn move_to(gm: &Map, size: usize, my_color: u8, sp: Pos, ep: Pos) -> Movement {
         half_tag = flag;
     }
 
+    if e.r#type == 5 && s.amount > 25 && half_tag == 0 {
+        let mut flag = 0;
+
+        for (nx, ny) in get_neighbours(gm, size, sp) {
+            let node = &gm[nx][ny];
+
+            if node.color != my_color
+                && matches!(node.r#type, 2 | 3 | 5)
+                && (nx != ep.0 || ny != ep.1)
+            {
+                flag = 1;
+                break;
+            }
+        }
+
+        half_tag = flag;
+    }
+
     (sp, ep, half_tag)
+}
+
+fn visible(gm: &Map, size: usize, my_color: u8, (x, y): Pos) -> bool {
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            let px = (x as i8 + dx) as usize;
+            let py = (y as i8 + dy) as usize;
+
+            if (1..=size).contains(&px) && (1..=size).contains(&py) && gm[px][py].color == my_color
+            {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 #[allow(clippy::needless_range_loop)]
@@ -79,24 +115,6 @@ fn change_target(
     color_to_uid: &HashMap<u8, u32>,
     config: &BotData,
 ) -> Option<Pos> {
-    let visible = |(x, y): Pos| {
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                let px = (x as i8 + dx) as usize;
-                let py = (y as i8 + dy) as usize;
-
-                if (1..=size).contains(&px)
-                    && (1..=size).contains(&py)
-                    && gm[px][py].color == my_color
-                {
-                    return true;
-                }
-            }
-        }
-
-        false
-    };
-
     let score: HashMap<u8, u8> = HashMap::from([(1, 1), (3, 2), (2, 2), (0, 3), (5, 4)]);
 
     let mut tmp = Vec::new();
@@ -105,7 +123,10 @@ fn change_target(
         for j in 1..=size {
             let node = &gm[i][j];
 
-            if !matches!(node.r#type, 4 | 6) && node.color != my_color && visible((i, j)) {
+            if !matches!(node.r#type, 4 | 6)
+                && node.color != my_color
+                && visible(gm, size, my_color, (i, j))
+            {
                 let uid = color_to_uid.get(&node.color)?;
 
                 if is_superior(uid, config) {
@@ -179,6 +200,24 @@ fn next_move(
     let mut q = VecDeque::new();
     let mut vis = HashMap::new();
 
+    let found_enemy = {
+        let mut ans = false;
+
+        'outer: for i in 1..=size {
+            for j in 1..=size {
+                if gm[i][j].color != my_color
+                    && matches!(gm[i][j].r#type, 1 | 2 | 3)
+                    && visible(gm, size, my_color, (i, j))
+                {
+                    ans = true;
+                    break 'outer;
+                }
+            }
+        }
+
+        ans
+    };
+
     let mut bfs = |i, j| {
         q.clear();
         vis.clear();
@@ -191,18 +230,20 @@ fn next_move(
 
         while let Some(((cur_x, cur_y), amount, length, ans)) = q.pop_front() {
             if cur_x == target_x && cur_y == target_y {
-                let score = amount as f64 / (length as f64).sqrt();
+                let score = amount as f64 / (length as f64).powf(1.1);
 
-                if score > max_score {
+                if score > max_score && amount > 0 {
                     max_score = score;
                     max_ans = ans;
 
-                    if from.is_none() {
-                        new_from = Some((i, j));
-                    }
+                    new_from = Some((i, j));
 
                     continue;
                 }
+            }
+
+            if !found_enemy && length > 6 {
+                continue;
             }
 
             for nxt in get_neighbours(gm, size, (cur_x, cur_y)) {
@@ -224,8 +265,11 @@ fn next_move(
         }
     };
 
+    let drop = from.is_some() && fastrand::u8(1..=100) >= 70;
+
     match &from {
-        None => {
+        Some((x, y)) if !drop => bfs(*x, *y),
+        _ => {
             for i in 1..=size {
                 for j in 1..=size {
                     if gm[i][j].color == my_color && gm[i][j].amount > 1 {
@@ -247,7 +291,6 @@ fn next_move(
                 }
             }
         }
-        Some((x, y)) => bfs(*x, *y),
     }
 
     if max_ans.is_none() {
@@ -259,7 +302,7 @@ fn next_move(
         *target = None;
     }
 
-    if from.is_none() {
+    if from.is_none() || drop {
         *from = new_from;
     }
 
@@ -315,18 +358,53 @@ fn expand(
 
     fastrand::shuffle(&mut tmp);
 
-    let get_score = |&(x, y): &Pos| {
-        let land = &gm[x][y];
+    let get_score = |from: &Pos, to: &Pos| {
+        let land = &gm[from.0][from.1];
         let mut score = score.get(&land.r#type).unwrap().to_owned();
 
         if config.team.contains(color_to_uid.get(&land.color).unwrap()) {
+            score += 50;
+        }
+
+        let (_, _, half_tag) = move_to(gm, size, my_color, *from, *to);
+
+        let remain = if half_tag == 1 { land.amount / 2 } else { 1 };
+
+        let mut flag = false;
+
+        for (nx, ny) in get_neighbours(gm, size, *from) {
+            if gm[nx][ny].color != my_color
+                && gm[nx][ny].amount > remain + 1
+                && (nx != to.0 || ny != to.1)
+            {
+                flag = true;
+                break;
+            }
+        }
+
+        if flag {
+            score += 10;
+        }
+
+        let to_remain = land.amount - remain - gm[to.0][to.1].amount;
+
+        let mut flag = false;
+
+        for (nx, ny) in get_neighbours(gm, size, *to) {
+            if gm[nx][ny].color != my_color && gm[nx][ny].amount > to_remain + 1 {
+                flag = true;
+                break;
+            }
+        }
+
+        if flag {
             score += 10;
         }
 
         score
     };
 
-    tmp.sort_unstable_by_key(|a| get_score(&a.1));
+    tmp.sort_unstable_by_key(|(from, to)| get_score(from, to));
 
     let (start, end) = tmp.first().copied()?;
 
@@ -342,7 +420,7 @@ pub fn bot_move(
     target: &mut Option<Pos>,
     from: &mut Option<Pos>,
 ) -> Option<Movement> {
-    if fastrand::u8(1..=100) >= config.bot.expand_rate {
+    if fastrand::u8(1..=100) > config.bot.expand_rate {
         next_move(
             gm,
             size,
