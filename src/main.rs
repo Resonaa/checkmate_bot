@@ -1,5 +1,5 @@
 use anyhow::Result;
-use checkmate_bot::{bot::new_bot, BotData, Config};
+use checkmate_bot::{consts::HALL_URL, socket::new_bot, BotData, Config};
 use indexmap::IndexSet;
 use lazy_static::lazy_static;
 use log::info;
@@ -23,7 +23,7 @@ lazy_static! {
 
                 for (id, bot) in config.bots.iter().enumerate() {
                     let res = client
-                        .get("https://kana.byha.top:444/checkmate/room")
+                        .get(HALL_URL)
                         .header("cookie", bot.cookie)
                         .send()
                         .and_then(|res| res.text())?;

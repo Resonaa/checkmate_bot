@@ -1,249 +1,383 @@
 use crate::{
-    event::{self, callback},
-    map, AutoReady, BotData,
+    consts::{DIR, EXPAND_SCORE, TARGET_SCORE},
+    map::{Land, Map},
+    BotData,
 };
-use anyhow::Result;
-use parking_lot::Mutex;
-use rust_socketio::{ClientBuilder, RawClient};
-use serde_json::json;
-use std::{collections::HashMap, sync::Arc};
+use fastrand::Rng;
+use std::{
+    collections::{HashMap, VecDeque},
+    ops::Index,
+};
 
-fn vote_start(socket: &RawClient, config: &BotData) -> Result<()> {
-    if let Some(room_config) = config.room {
-        if let Some(map) = room_config.map {
-            socket.emit("changeSettings", json!({"map": map.to_string()}))?;
-        }
-    }
+pub type Pos = (usize, usize);
+pub type Movement = (Pos, Pos, u8);
 
-    if let AutoReady::Unconditional(true) = config.bot.auto_ready {
-        socket.emit("VoteStart", json!(1))?;
-    }
-
-    Ok(())
+pub struct Bot {
+    pub size: usize,
+    pub gm: Map,
+    pub my_color: u8,
+    pub color_to_uid: HashMap<u8, u32>,
+    pub target: Option<Pos>,
+    pub from: Option<Pos>,
+    config: &'static BotData,
+    rng: Rng,
 }
 
-pub fn new_bot(config: &'static BotData) -> Result<()> {
-    let global_vote = Arc::new(Mutex::new(false));
-    let global_size = Arc::new(Mutex::new(0));
-    let global_gm = Arc::new(Mutex::new(Vec::<Vec<_>>::new()));
-    let global_my_color = Arc::new(Mutex::new(0));
-    let global_color_to_uid = Arc::new(Mutex::new(HashMap::new()));
-    let global_target = Arc::new(Mutex::new(None));
-    let global_from = Arc::new(Mutex::new(None));
+impl Index<Pos> for Bot {
+    type Output = Land;
 
-    let open = move |_, socket: RawClient| {
-        info!("{} connected", config.team[config.id - 1]);
-        socket.emit("joinRoom", config.bot.room)?;
+    fn index(&self, index: Pos) -> &Self::Output {
+        &self.gm[index.0][index.1]
+    }
+}
 
-        vote_start(&socket, config)?;
-
-        Ok(())
-    };
-
-    let update_settings = |payload: String, socket: RawClient| {
-        let update_settings: event::UpdateSettings = serde_json::from_str(&payload)?;
-
-        if let Some(room_config) = config.room {
-            if let Some(config_speed) = room_config.speed {
-                match update_settings.speed {
-                    event::Speed::U8(speed) => {
-                        if speed != config_speed {
-                            socket.emit("changeSettings", json!({ "speed": config_speed }))?;
-                        }
-                    }
-                    event::Speed::String(speed) => {
-                        if speed != config_speed.to_string() {
-                            socket.emit("changeSettings", json!({ "speed": config_speed }))?;
-                        }
-                    }
-                }
-            }
-
-            if let Some(config_private) = room_config.private {
-                if update_settings.private != config_private {
-                    socket.emit("changeSettings", json!({ "private": config_private }))?;
-                }
-            }
-        }
-
-        Ok(())
-    };
-
-    let gm = global_gm.clone();
-    let size = global_size.clone();
-    let my_color = global_my_color.clone();
-    let update_gm = move |payload: String, _| {
-        use event::NewMapNode;
-
-        let update_gm: Vec<Vec<_>> = serde_json::from_str(&payload)?;
-
-        if let NewMapNode::MapInfo(map_info) = &update_gm[0][0] {
-            *size.lock() = map_info.size;
-        }
-
-        *gm.lock() = update_gm
-            .into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .map(|node| match node {
-                        NewMapNode::MapInfo(_) => map::Land {
-                            ..Default::default()
-                        },
-                        NewMapNode::Land(land) => land,
-                    })
-                    .collect()
-            })
-            .collect();
-
-        Ok(())
-    };
-
-    let update_color = move |payload: String, _| {
-        *my_color.lock() = payload.parse()?;
-
-        Ok(())
-    };
-
-    let gm = global_gm;
-    let size = global_size;
-    let my_color = global_my_color;
-    let color_to_uid = global_color_to_uid.clone();
-    let target = global_target.clone();
-    let from = global_from;
-    let map_update = move |payload: String, socket: RawClient| {
-        let map_update: [event::MapUpdate; 2] = serde_json::from_str(&payload)?;
-
-        let mut gm = gm.lock();
-
-        if gm.len() == 0 {
-            return Ok(());
-        }
-
-        if let event::MapUpdate::Data(data) = &map_update[1] {
-            for [x, y, land] in data {
-                gm[x.parse::<usize>()?][y.parse::<usize>()?] = serde_json::from_str(land)?;
-            }
-        }
-
-        let size = size.lock();
-        let my_color = my_color.lock();
-        let color_to_uid = color_to_uid.lock();
-        let mut target = target.lock();
-        let mut from = from.lock();
-
-        if config.id > 1 {
-            let mut flag = true;
-
-            'outer: for i in 1..=*size {
-                for j in 1..=*size {
-                    let color = gm[i][j].color;
-
-                    if color != 0 && !config.team.contains(color_to_uid.get(&color).unwrap()) {
-                        flag = false;
-                        break 'outer;
-                    }
-                }
-            }
-
-            if flag {
-                socket.emit("view", json!(true))?;
-                socket.emit("view", json!(false))?;
-                return Ok(());
-            }
-        }
-
-        let movememt = map::bot_move(
-            &gm,
-            *size,
-            *my_color,
-            &color_to_uid,
+impl Bot {
+    pub fn new(config: &'static BotData) -> Self {
+        Self {
             config,
-            &mut target,
-            &mut from,
-        );
-
-        if let Some(((x1, y1), (x2, y2), half_tag)) = movememt {
-            socket.emit("UploadMovement", json!([x1, y1, x2, y2, half_tag]))?;
+            rng: Rng::new(),
+            size: 0,
+            my_color: 0,
+            color_to_uid: HashMap::new(),
+            target: None,
+            from: None,
+            gm: Vec::new(),
         }
+    }
 
-        Ok(())
-    };
+    #[inline]
+    fn is_superior(&self, uid: u32) -> bool {
+        matches!(self.config.team.get_index_of(&uid), Some(index) if index + 1 > self.config.id)
+    }
 
-    let target = global_target;
-    let vote = global_vote.clone();
-    let win_action = move |payload: String, socket| {
-        let winner: String = serde_json::from_str(&payload)?;
+    #[inline]
+    fn is_valid_pos(&self, (x, y): Pos) -> bool {
+        (1..=self.size).contains(&x) && (1..=self.size).contains(&y)
+    }
 
-        if config.id == 1 && config.bot.team == 0 {
-            info!("Room {}: {} won", config.bot.room, winner);
-        }
+    #[inline]
+    fn get_neighbours(&self, (x, y): Pos) -> Vec<Pos> {
+        DIR.iter()
+            .map(|(dx, dy)| ((x as i8 + dx) as usize, (y as i8 + dy) as usize))
+            .filter(|&pos| self.is_valid_pos(pos) && !matches!(self[pos].r#type, 4 | 6))
+            .collect()
+    }
 
-        *target.lock() = None;
+    #[inline]
+    fn iter(&self) -> impl IntoIterator<Item = (Pos, &Land)> + '_ {
+        (1..=self.size)
+            .flat_map(|x| (1..=self.size).map(move |y| (x, y)))
+            .map(|pos| (pos, &self[pos]))
+    }
 
-        vote_start(&socket, config)?;
+    fn move_to(&self, from: Pos, to: Pos) -> Movement {
+        let from_land = &self[from];
+        let to_land = &self[to];
 
-        *vote.lock() = false;
+        let mut half_tag = 0;
 
-        Ok(())
-    };
+        if !matches!(to_land.r#type, 0 | 5)
+            && to_land.color != self.my_color
+            && (from_land.amount as i32 - 1) / 2 > to_land.amount as i32
+        {
+            for neighbour in self.get_neighbours(from) {
+                let land = &self[neighbour];
 
-    let color_to_uid = global_color_to_uid;
-    let update_user = move |payload: String, _| {
-        let value: serde_json::Value = serde_json::from_str(&payload)?;
-        let map = value.as_object().unwrap();
-
-        let mut color_to_uid = color_to_uid.lock();
-        color_to_uid.clear();
-
-        for (uid, value) in map {
-            let color = value["color"].as_u64().unwrap() as u8;
-            let gaming = value["gaming"].as_bool().unwrap();
-
-            if color != 0 && gaming {
-                let uid: u32 = uid.parse()?;
-
-                color_to_uid.insert(color, uid);
+                if land.color != self.my_color && matches!(land.r#type, 2 | 3) && neighbour != to {
+                    half_tag = 1;
+                    break;
+                }
             }
         }
 
-        color_to_uid.insert(0, 0);
+        if to_land.r#type == 5 && from_land.amount > 25 && half_tag == 0 {
+            for neighbour in self.get_neighbours(from) {
+                let land = &self[neighbour];
 
-        Ok(())
-    };
-
-    let vote = global_vote;
-    let logged_user_count = move |payload: String, socket: RawClient| {
-        if let AutoReady::Conditional { more_than } = config.bot.auto_ready {
-            let [count, _]: [u8; 2] = serde_json::from_str(&payload)?;
-
-            let mut vote = vote.lock();
-
-            if count > more_than && !*vote {
-                *vote = true;
-                socket.emit("VoteStart", json!("1"))?;
-            } else if count <= more_than && *vote {
-                *vote = false;
-                socket.emit("VoteStart", json!("0"))?;
+                if land.color != self.my_color
+                    && matches!(land.r#type, 2 | 3 | 5)
+                    && neighbour != to
+                {
+                    half_tag = 1;
+                    break;
+                }
             }
         }
 
-        Ok(())
-    };
+        (from, to, half_tag)
+    }
 
-    ClientBuilder::new("https://kana.byha.top:444/ws/checkmate/")
-        .opening_header("cookie", config.bot.cookie)
-        .on("open", callback(open))
-        .on("close", move |_, _| {
-            error!("{} disconnected", config.team[config.id - 1])
-        })
-        .on("UpdateSettings", callback(update_settings))
-        .on("UpdateGM", callback(update_gm))
-        .on("UpdateColor", callback(update_color))
-        .on("Map_Update", callback(map_update))
-        .on("WinAnction", callback(win_action))
-        .on("UpdateUser", callback(update_user))
-        .on("LoggedUserCount", callback(logged_user_count))
-        .connect()?;
+    fn visible(&self, (x, y): Pos) -> bool {
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let pos = ((x as i8 + dx) as usize, (y as i8 + dy) as usize);
 
-    Ok(())
+                if self.is_valid_pos(pos) && self[pos].color == self.my_color {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn get_new_target(&self) -> Option<Pos> {
+        let mut targets = Vec::new();
+
+        for (pos, land) in self.iter() {
+            if !matches!(land.r#type, 4 | 6) && land.color != self.my_color && self.visible(pos) {
+                let owner_uid = self.color_to_uid.get(&land.color)?;
+
+                if self.is_superior(*owner_uid) {
+                    continue;
+                }
+
+                targets.push(pos);
+            }
+        }
+
+        if targets.is_empty() {
+            return None;
+        }
+
+        self.rng.shuffle(&mut targets);
+
+        let get_score = |&pos: &Pos| {
+            let land = &self[pos];
+            let mut score = *TARGET_SCORE.get(&land.r#type).unwrap();
+
+            if self
+                .config
+                .team
+                .contains(self.color_to_uid.get(&land.color).unwrap())
+            {
+                score += 10;
+            }
+
+            score
+        };
+
+        targets.sort_unstable_by_key(|target| get_score(target));
+
+        targets.first().copied()
+    }
+
+    fn move_to_target(&mut self, fallback: bool) -> Option<Movement> {
+        if self.target.is_none()
+            || matches!(&self.target, Some(target) if self[*target].color == self.my_color)
+        {
+            self.target = self.get_new_target();
+            self.from = None;
+
+            if self.target.is_none() {
+                return if fallback { self.expand(false) } else { None };
+            }
+        }
+
+        let target = self.target.unwrap();
+
+        let get_score = |pos: Pos| {
+            let land = &self[pos];
+
+            if land.color == self.my_color {
+                land.amount as i32 - 1
+            } else {
+                -(land.amount as i32) - 1
+            }
+        };
+
+        let mut max_ans = None;
+        let mut max_score = f64::MIN;
+        let mut new_from = None;
+
+        let mut q = VecDeque::new();
+        let mut vis = HashMap::new();
+
+        let mut found_enemy = false;
+
+        for (pos, land) in self.iter() {
+            if land.color != self.my_color && matches!(land.r#type, 1 | 2 | 3) && self.visible(pos)
+            {
+                found_enemy = true;
+                break;
+            }
+        }
+
+        let mut bfs = |from: Pos| {
+            q.clear();
+            vis.clear();
+
+            q.push_back((from, get_score(from), 0, None));
+            vis.insert(from, true);
+
+            while let Some((cur, amount, length, ans)) = q.pop_front() {
+                if cur == target {
+                    let score = amount as f64 / (length as f64).powf(1.1);
+
+                    if score > max_score && !(amount < 0 && length < 3) {
+                        max_score = score;
+                        max_ans = ans;
+
+                        new_from = Some(from);
+
+                        continue;
+                    }
+                }
+
+                if !found_enemy && length > 6 {
+                    continue;
+                }
+
+                for nxt in self.get_neighbours(cur) {
+                    vis.entry(nxt).or_insert_with(|| {
+                        if cur == from {
+                            q.push_back((nxt, amount + get_score(nxt), length + 1, Some(nxt)));
+                        } else {
+                            q.push_back((nxt, amount + get_score(nxt), length + 1, ans));
+                        }
+
+                        true
+                    });
+                }
+            }
+        };
+
+        let abandon = self.from.is_some() && self.rng.u8(1..=100) >= 70;
+
+        match &self.from {
+            Some(from) if !abandon => bfs(*from),
+            _ => {
+                for (pos, land) in self.iter() {
+                    if land.color == self.my_color && land.amount > 1 {
+                        let mut flag = true;
+
+                        for neighbour in self.get_neighbours(pos) {
+                            let land = &self[neighbour];
+
+                            if land.color != self.my_color && matches!(land.r#type, 2 | 3) {
+                                flag = false;
+                                break;
+                            }
+                        }
+
+                        if flag {
+                            bfs(pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        if max_ans.is_none() {
+            self.target = None;
+            return None;
+        }
+
+        if matches!(max_ans, Some(max_ans) if max_ans == target) {
+            self.target = None;
+        }
+
+        if self.from.is_none() || abandon {
+            self.from = new_from;
+        }
+
+        let ans = self.move_to(self.from.unwrap(), max_ans.unwrap());
+        self.from = max_ans;
+        Some(ans)
+    }
+
+    fn expand(&mut self, fallback: bool) -> Option<Movement> {
+        let mut moves = Vec::new();
+
+        for (from, from_land) in self.iter() {
+            if from_land.color == self.my_color {
+                for to in self.get_neighbours(from) {
+                    let to_land = &self[to];
+
+                    let delta = if to_land.r#type == 3 { 2 } else { 1 };
+
+                    if to_land.color != self.my_color && from_land.amount > to_land.amount + delta {
+                        if self.is_superior(*self.color_to_uid.get(&to_land.color)?) {
+                            continue;
+                        }
+
+                        moves.push((from, to));
+                    }
+                }
+            }
+        }
+
+        if moves.is_empty() {
+            return if fallback {
+                self.move_to_target(false)
+            } else {
+                None
+            };
+        }
+
+        self.rng.shuffle(&mut moves);
+
+        let get_score = |&from: &Pos, &to: &Pos| {
+            let from_land = &self[from];
+            let to_land = &self[to];
+
+            let mut score = EXPAND_SCORE.get(&to_land.r#type).unwrap().to_owned();
+
+            if from_land.r#type == 2 && matches!(to_land.r#type, 1 | 3) {
+                score -= 20 - (from_land.amount - to_land.amount).min(10) as i8;
+            }
+
+            let (_, _, half_tag) = self.move_to(from, to);
+
+            let from_remain = if half_tag == 1 {
+                from_land.amount / 2
+            } else {
+                1
+            };
+
+            for neighbour in self.get_neighbours(from) {
+                if self[neighbour].color != self.my_color
+                    && self[neighbour].amount > from_remain + 1
+                    && neighbour != to
+                {
+                    score += 10;
+                    break;
+                }
+            }
+
+            let to_remain = from_land.amount - from_remain - to_land.amount;
+
+            for neighbour in self.get_neighbours(to) {
+                if self[neighbour].color != self.my_color && self[neighbour].amount > to_remain + 1
+                {
+                    score += 10;
+                    break;
+                }
+            }
+
+            if self
+                .config
+                .team
+                .contains(self.color_to_uid.get(&to_land.color).unwrap())
+            {
+                score += 100;
+            }
+
+            score
+        };
+
+        moves.sort_unstable_by_key(|(from, to)| get_score(from, to));
+
+        let (from, to) = moves.first()?;
+
+        Some(self.move_to(*from, *to))
+    }
+
+    pub fn next_move(&mut self) -> Option<Movement> {
+        if self.rng.u8(1..=100) > self.config.bot.expand_rate {
+            self.move_to_target(true)
+        } else {
+            self.expand(true)
+        }
+    }
 }

@@ -3,11 +3,16 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 pub mod bot;
+pub mod consts;
 pub mod event;
 pub mod map;
+pub mod socket;
 
 #[macro_use]
 extern crate log;
+
+#[macro_use]
+extern crate lazy_static;
 
 #[derive(Deserialize, Clone, Copy)]
 #[serde(untagged)]
@@ -49,6 +54,7 @@ pub struct Config<'a> {
     pub rooms: HashMap<&'a str, RoomConfig>,
 }
 
+#[derive(Clone)]
 pub struct BotData {
     pub id: usize,
     pub bot: BotConfig<'static>,
