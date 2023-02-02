@@ -15,7 +15,6 @@ cookie = "client_session=xxxxxx"
 room = "Test"                    # another bot in `Test`
 auto_ready = { more_than = 5 }
 team = 1                         # but in a different (explicitly given) team, plays against the other two bots
-expand_rate = 80                 # custom expand rate
 
 [[bots]]
 cookie = "client_session=xxxxxx"

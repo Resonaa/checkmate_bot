@@ -1,5 +1,5 @@
 use crate::{
-    consts::{DIR, EXPAND_SCORE, TARGET_SCORE},
+    consts::{DIR, EXPAND_SCORE, SCORE_POWER, TARGET_SCORE},
     map::{Land, Map},
     BotData,
 };
@@ -9,8 +9,8 @@ use std::{
     ops::Index,
 };
 
-pub type Pos = (usize, usize);
-pub type Movement = (Pos, Pos, u8);
+type Pos = (usize, usize);
+type Movement = (Pos, Pos, u8);
 
 pub struct Bot {
     pub size: usize,
@@ -18,7 +18,7 @@ pub struct Bot {
     pub my_color: u8,
     pub color_to_uid: HashMap<u8, u32>,
     pub target: Option<Pos>,
-    pub from: Option<Pos>,
+    from: Option<Pos>,
     config: &'static BotData,
     rng: Rng,
 }
@@ -46,20 +46,20 @@ impl Bot {
     }
 
     #[inline]
-    fn is_superior(&self, uid: u32) -> bool {
+    fn superior(&self, uid: u32) -> bool {
         matches!(self.config.team.get_index_of(&uid), Some(index) if index + 1 > self.config.id)
     }
 
     #[inline]
-    fn is_valid_pos(&self, (x, y): Pos) -> bool {
-        (1..=self.size).contains(&x) && (1..=self.size).contains(&y)
+    const fn valid_pos(&self, (x, y): Pos) -> bool {
+        x >= 1 && x <= self.size && y >= 1 && y <= self.size
     }
 
     #[inline]
-    fn get_neighbours(&self, (x, y): Pos) -> Vec<Pos> {
+    fn neighbours(&self, (x, y): Pos) -> Vec<Pos> {
         DIR.iter()
             .map(|(dx, dy)| ((x as i8 + dx) as usize, (y as i8 + dy) as usize))
-            .filter(|&pos| self.is_valid_pos(pos) && !matches!(self[pos].r#type, 4 | 6))
+            .filter(|&pos| self.valid_pos(pos) && !matches!(self[pos].r#type, 4 | 6))
             .collect()
     }
 
@@ -80,7 +80,7 @@ impl Bot {
             && to_land.color != self.my_color
             && (from_land.amount as i32 - 1) / 2 > to_land.amount as i32
         {
-            for neighbour in self.get_neighbours(from) {
+            for neighbour in self.neighbours(from) {
                 let land = &self[neighbour];
 
                 if land.color != self.my_color && matches!(land.r#type, 2 | 3) && neighbour != to {
@@ -91,7 +91,7 @@ impl Bot {
         }
 
         if to_land.r#type == 5 && from_land.amount > 25 && half_tag == 0 {
-            for neighbour in self.get_neighbours(from) {
+            for neighbour in self.neighbours(from) {
                 let land = &self[neighbour];
 
                 if land.color != self.my_color
@@ -112,7 +112,7 @@ impl Bot {
             for dy in -1..=1 {
                 let pos = ((x as i8 + dx) as usize, (y as i8 + dy) as usize);
 
-                if self.is_valid_pos(pos) && self[pos].color == self.my_color {
+                if self.valid_pos(pos) && self[pos].color == self.my_color {
                     return true;
                 }
             }
@@ -121,14 +121,14 @@ impl Bot {
         false
     }
 
-    fn get_new_target(&self) -> Option<Pos> {
+    fn new_target(&self) -> Option<Pos> {
         let mut targets = Vec::new();
 
         for (pos, land) in self.iter() {
             if !matches!(land.r#type, 4 | 6) && land.color != self.my_color && self.visible(pos) {
                 let owner_uid = self.color_to_uid.get(&land.color)?;
 
-                if self.is_superior(*owner_uid) {
+                if self.superior(*owner_uid) {
                     continue;
                 }
 
@@ -136,15 +136,11 @@ impl Bot {
             }
         }
 
-        if targets.is_empty() {
-            return None;
-        }
-
         self.rng.shuffle(&mut targets);
 
         let get_score = |&pos: &Pos| {
             let land = &self[pos];
-            let mut score = *TARGET_SCORE.get(&land.r#type).unwrap();
+            let mut score = TARGET_SCORE[land.r#type as usize];
 
             if self
                 .config
@@ -162,19 +158,105 @@ impl Bot {
         targets.first().copied()
     }
 
-    fn move_to_target(&mut self, fallback: bool) -> Option<Movement> {
-        if self.target.is_none()
-            || matches!(&self.target, Some(target) if self[*target].color == self.my_color)
-        {
-            self.target = self.get_new_target();
-            self.from = None;
+    pub fn expand(&mut self) -> Option<Movement> {
+        let mut moves = Vec::new();
 
-            if self.target.is_none() {
-                return if fallback { self.expand(false) } else { None };
+        for (from, from_land) in self.iter() {
+            if from_land.color == self.my_color {
+                for to in self.neighbours(from) {
+                    let to_land = &self[to];
+
+                    let delta = if to_land.r#type == 3 { 2 } else { 1 };
+
+                    if to_land.color != self.my_color && from_land.amount > to_land.amount + delta {
+                        if self.superior(*self.color_to_uid.get(&to_land.color)?) {
+                            continue;
+                        }
+
+                        moves.push((from, to));
+                    }
+                }
             }
         }
 
-        let target = self.target.unwrap();
+        self.rng.shuffle(&mut moves);
+
+        let get_score = |&from: &Pos, &to: &Pos| {
+            let from_land = &self[from];
+            let to_land = &self[to];
+
+            let mut score = EXPAND_SCORE[to_land.r#type as usize];
+
+            if from_land.r#type == 2 && matches!(to_land.r#type, 1 | 3) {
+                score -= 20 - (from_land.amount - to_land.amount).min(10) as i8;
+            }
+
+            let (_, _, half_tag) = self.move_to(from, to);
+
+            let from_remain = if half_tag == 1 {
+                from_land.amount / 2
+            } else {
+                1
+            };
+
+            for neighbour in self.neighbours(from) {
+                if self[neighbour].color != self.my_color
+                    && self[neighbour].amount > from_remain + 1
+                    && neighbour != to
+                {
+                    score += 10;
+                    break;
+                }
+            }
+
+            let to_remain = from_land.amount - from_remain - to_land.amount;
+
+            for neighbour in self.neighbours(to) {
+                if self[neighbour].color != self.my_color && self[neighbour].amount > to_remain + 1
+                {
+                    score += 10;
+                    break;
+                }
+            }
+
+            if self
+                .config
+                .team
+                .contains(self.color_to_uid.get(&to_land.color).unwrap())
+            {
+                score += 100;
+            }
+
+            score
+        };
+
+        moves.sort_unstable_by_key(|(from, to)| get_score(from, to));
+
+        match moves.first() {
+            Some(&(from, to)) => {
+                if Some(from) == self.from && Some(to) != self.target {
+                    self.target = None;
+                }
+
+                Some(self.move_to(from, to))
+            }
+            None => self.move_to_target(0),
+        }
+    }
+
+    fn move_to_target(&mut self, try_time: u8) -> Option<Movement> {
+        if try_time >= self.config.bot.calc_cnt {
+            return None;
+        }
+
+        if self.target.is_none()
+            || matches!(&self.target, Some(target) if self[*target].color == self.my_color)
+        {
+            self.target = self.new_target();
+            self.from = None;
+        }
+
+        let target = self.target?;
 
         let get_score = |pos: Pos| {
             let land = &self[pos];
@@ -204,65 +286,75 @@ impl Bot {
         }
 
         let mut bfs = |from: Pos| {
-            q.clear();
-            vis.clear();
+            let mut tmp_ans = None;
+            let mut tmp_score = f64::MIN;
+            let mut tmp_from = None;
 
-            q.push_back((from, get_score(from), 0, None));
-            vis.insert(from, true);
+            for try_time in 0..self.config.bot.calc_cnt {
+                q.clear();
+                vis.clear();
 
-            while let Some((cur, amount, length, ans)) = q.pop_front() {
-                if cur == target {
-                    let score = amount as f64 / (length as f64).powf(1.1);
+                q.push_back((from, get_score(from), 0, None));
+                vis.insert(from, ());
 
-                    if score > max_score && !(amount < 0 && length < 3) {
-                        max_score = score;
-                        max_ans = ans;
+                while let Some((cur, amount, length, ans)) = q.pop_front() {
+                    if cur == target {
+                        let score = amount as f64 / (length as f64).powf(SCORE_POWER);
 
-                        new_from = Some(from);
+                        if score > tmp_score && !(amount < 0 && length < 2) {
+                            tmp_score = score;
+                            tmp_ans = ans;
 
+                            tmp_from = Some(from);
+
+                            continue;
+                        }
+                    }
+
+                    if !found_enemy && length > 6 {
                         continue;
+                    }
+
+                    let mut neighbours = self.neighbours(cur);
+                    self.rng.shuffle(&mut neighbours);
+
+                    for nxt in neighbours {
+                        vis.entry(nxt).or_insert_with(|| {
+                            if cur == from {
+                                q.push_back((nxt, amount + get_score(nxt), length + 1, Some(nxt)));
+                            } else {
+                                q.push_back((nxt, amount + get_score(nxt), length + 1, ans));
+                            }
+                        });
                     }
                 }
 
-                if !found_enemy && length > 6 {
-                    continue;
+                if try_time == 2 && tmp_score < max_score / 2.0 {
+                    break;
                 }
+            }
 
-                for nxt in self.get_neighbours(cur) {
-                    vis.entry(nxt).or_insert_with(|| {
-                        if cur == from {
-                            q.push_back((nxt, amount + get_score(nxt), length + 1, Some(nxt)));
-                        } else {
-                            q.push_back((nxt, amount + get_score(nxt), length + 1, ans));
-                        }
-
-                        true
-                    });
-                }
+            if tmp_score > max_score {
+                max_score = tmp_score;
+                max_ans = tmp_ans;
+                new_from = tmp_from;
             }
         };
 
-        let abandon = self.from.is_some() && self.rng.u8(1..=100) >= 70;
-
         match &self.from {
-            Some(from) if !abandon => bfs(*from),
+            Some(from) => bfs(*from),
             _ => {
-                for (pos, land) in self.iter() {
+                'outer: for (pos, land) in self.iter() {
                     if land.color == self.my_color && land.amount > 1 {
-                        let mut flag = true;
-
-                        for neighbour in self.get_neighbours(pos) {
+                        for neighbour in self.neighbours(pos) {
                             let land = &self[neighbour];
 
-                            if land.color != self.my_color && matches!(land.r#type, 2 | 3) {
-                                flag = false;
-                                break;
+                            if land.color != self.my_color && matches!(land.r#type, 0 | 2 | 3) {
+                                continue 'outer;
                             }
                         }
 
-                        if flag {
-                            bfs(pos);
-                        }
+                        bfs(pos);
                     }
                 }
             }
@@ -270,114 +362,21 @@ impl Bot {
 
         if max_ans.is_none() {
             self.target = None;
-            return None;
+            return self.move_to_target(try_time + 1);
         }
 
-        if matches!(max_ans, Some(max_ans) if max_ans == target) {
+        let max_ans = max_ans.unwrap();
+
+        if max_ans == target {
             self.target = None;
         }
 
-        if self.from.is_none() || abandon {
+        if self.from.is_none() {
             self.from = new_from;
         }
 
-        let ans = self.move_to(self.from.unwrap(), max_ans.unwrap());
-        self.from = max_ans;
+        let ans = self.move_to(self.from.unwrap(), max_ans);
+        self.from = Some(max_ans);
         Some(ans)
-    }
-
-    fn expand(&mut self, fallback: bool) -> Option<Movement> {
-        let mut moves = Vec::new();
-
-        for (from, from_land) in self.iter() {
-            if from_land.color == self.my_color {
-                for to in self.get_neighbours(from) {
-                    let to_land = &self[to];
-
-                    let delta = if to_land.r#type == 3 { 2 } else { 1 };
-
-                    if to_land.color != self.my_color && from_land.amount > to_land.amount + delta {
-                        if self.is_superior(*self.color_to_uid.get(&to_land.color)?) {
-                            continue;
-                        }
-
-                        moves.push((from, to));
-                    }
-                }
-            }
-        }
-
-        if moves.is_empty() {
-            return if fallback {
-                self.move_to_target(false)
-            } else {
-                None
-            };
-        }
-
-        self.rng.shuffle(&mut moves);
-
-        let get_score = |&from: &Pos, &to: &Pos| {
-            let from_land = &self[from];
-            let to_land = &self[to];
-
-            let mut score = EXPAND_SCORE.get(&to_land.r#type).unwrap().to_owned();
-
-            if from_land.r#type == 2 && matches!(to_land.r#type, 1 | 3) {
-                score -= 20 - (from_land.amount - to_land.amount).min(10) as i8;
-            }
-
-            let (_, _, half_tag) = self.move_to(from, to);
-
-            let from_remain = if half_tag == 1 {
-                from_land.amount / 2
-            } else {
-                1
-            };
-
-            for neighbour in self.get_neighbours(from) {
-                if self[neighbour].color != self.my_color
-                    && self[neighbour].amount > from_remain + 1
-                    && neighbour != to
-                {
-                    score += 10;
-                    break;
-                }
-            }
-
-            let to_remain = from_land.amount - from_remain - to_land.amount;
-
-            for neighbour in self.get_neighbours(to) {
-                if self[neighbour].color != self.my_color && self[neighbour].amount > to_remain + 1
-                {
-                    score += 10;
-                    break;
-                }
-            }
-
-            if self
-                .config
-                .team
-                .contains(self.color_to_uid.get(&to_land.color).unwrap())
-            {
-                score += 100;
-            }
-
-            score
-        };
-
-        moves.sort_unstable_by_key(|(from, to)| get_score(from, to));
-
-        let (from, to) = moves.first()?;
-
-        Some(self.move_to(*from, *to))
-    }
-
-    pub fn next_move(&mut self) -> Option<Movement> {
-        if self.rng.u8(1..=100) > self.config.bot.expand_rate {
-            self.move_to_target(true)
-        } else {
-            self.expand(true)
-        }
     }
 }

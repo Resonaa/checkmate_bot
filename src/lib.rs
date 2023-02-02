@@ -1,28 +1,22 @@
+use consts::default_calc_cnt;
 use indexmap::IndexSet;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-pub mod bot;
+mod bot;
 pub mod consts;
-pub mod event;
-pub mod map;
+mod event;
+mod map;
 pub mod socket;
 
 #[macro_use]
 extern crate log;
-
-#[macro_use]
-extern crate lazy_static;
 
 #[derive(Deserialize, Clone, Copy)]
 #[serde(untagged)]
 pub enum AutoReady {
     Unconditional(bool),
     Conditional { more_than: u8 },
-}
-
-const fn default_expand_rate() -> u8 {
-    70
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -34,8 +28,8 @@ pub struct BotConfig<'a> {
     #[serde(default)]
     pub team: u32,
 
-    #[serde(default = "default_expand_rate")]
-    pub expand_rate: u8,
+    #[serde(default = "default_calc_cnt")]
+    pub calc_cnt: u8,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -49,8 +43,6 @@ pub struct RoomConfig {
 pub struct Config<'a> {
     #[serde(borrow)]
     pub bots: Vec<BotConfig<'a>>,
-
-    #[serde(borrow)]
     pub rooms: HashMap<&'a str, RoomConfig>,
 }
 

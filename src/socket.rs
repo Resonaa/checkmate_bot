@@ -135,7 +135,7 @@ pub fn new_bot(config: &'static BotData) -> Result<()> {
             }
         }
 
-        if let Some(((x1, y1), (x2, y2), half_tag)) = bot.next_move() {
+        if let Some(((x1, y1), (x2, y2), half_tag)) = bot.expand() {
             socket.emit("UploadMovement", json!([x1, y1, x2, y2, half_tag]))?;
         }
 
